@@ -127,6 +127,11 @@ configuration values, others become hard-coded values for the library.
 `NO_FIND_LEAK` - Excludes the support of the find-leak mode (for smaller code
 size).
 
+`NO_USER_DEFINED_STACKS` - Excludes the support of client-registered stacks
+(`GC_register_stack`, `GC_unregister_stack`, `GC_current_stack`), which is
+otherwise enabled by default on the platforms that support it (pthreads,
+except for some targets).
+
 `FIND_LEAK` - Causes the collector to assume that all inaccessible objects
 should have been explicitly deallocated, and reports exceptions.
 Finalization and some of the test programs are not usable in this mode.

@@ -108,6 +108,11 @@ check_PROGRAMS += initfromthreadtest
 initfromthreadtest_SOURCES = tests/initfromthread.c
 initfromthreadtest_LDADD = $(test_ldadd) $(THREADDLLIBS)
 
+TESTS += stackstest$(EXEEXT)
+check_PROGRAMS += stackstest
+stackstest_SOURCES = tests/stacks.c
+stackstest_LDADD = $(test_ldadd) $(THREADDLLIBS)
+
 TESTS += subthreadcreatetest$(EXEEXT)
 check_PROGRAMS += subthreadcreatetest
 subthreadcreatetest_SOURCES = tests/subthreadcreate.c
@@ -209,6 +214,7 @@ check-without-test-driver: $(TESTS)
 	test ! -f disclaim_bench$(EXEEXT) || ./disclaim_bench$(EXEEXT)
 	test ! -f disclaimtest$(EXEEXT) || ./disclaimtest$(EXEEXT)
 	test ! -f initfromthreadtest$(EXEEXT) || ./initfromthreadtest$(EXEEXT)
+	test ! -f stackstest$(EXEEXT) || ./stackstest$(EXEEXT)
 	test ! -f subthreadcreatetest$(EXEEXT) || ./subthreadcreatetest$(EXEEXT)
 	test ! -f threadkeytest$(EXEEXT) || ./threadkeytest$(EXEEXT)
 	test ! -f threadleaktest$(EXEEXT) || ./threadleaktest$(EXEEXT)

@@ -854,6 +854,9 @@ GC_push_all_stacks(void)
 #  ifdef DEBUG_THREADS
   GC_log_printf("Pushing stacks from thread %p\n", PTHREAD_TO_VPTR(self));
 #  endif
+#  ifdef USER_DEFINED_STACKS
+  GC_stacks_next_epoch();
+#  endif
   for (i = 0; i < THREAD_TABLE_SZ; i++) {
     for (p = GC_threads[i]; p != NULL; p = p->tm.next) {
 #  if defined(E2K) || defined(IA64)
@@ -934,6 +937,24 @@ GC_push_all_stacks(void)
       if (GC_sp_corrector != 0)
         GC_sp_corrector((void **)&lo, THREAD_ID_TO_VPTR(p->id));
 #  endif
+#  ifdef USER_DEFINED_STACKS
+      {
+        struct GC_stack *stk = GC_active_stack_containing(lo);
+
+        if (stk != NULL && (ptr_t)stk->base != hi) {
+          /*
+           * The thread is currently executing on a client-registered
+           * stack (e.g. a fiber or coroutine stack) other than its own
+           * one; scan that stack instead.  The thread's own stack is
+           * expected to be scanned through its `saved_sp` (see
+           * `GC_push_suspended_stacks`).  The stack sections (if any)
+           * belong to the thread's own stack, so skip them here.
+           */
+          hi = (ptr_t)stk->base;
+          traced_stack_sect = NULL;
+        }
+      }
+#  endif
       GC_push_all_stack_sections(lo, hi, traced_stack_sect);
 #  ifdef STACK_GROWS_UP
       total_size += lo - hi;
@@ -979,6 +1000,10 @@ GC_push_all_stacks(void)
 #  endif
     }
   }
+#  ifdef USER_DEFINED_STACKS
+  /* Scan the suspended client-registered (fiber, coroutine) stacks. */
+  total_size += GC_push_suspended_stacks();
+#  endif
   GC_VERBOSE_LOG_PRINTF("Pushed %d thread stacks\n", (int)nthreads);
   if (!found_me && !GC_in_thread_creation)
     ABORT("Collecting from unknown thread");

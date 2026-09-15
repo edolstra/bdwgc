@@ -4429,6 +4429,25 @@ GC_INNER void GC_do_blocking_inner(ptr_t data, void *context);
  */
 GC_INNER void GC_push_all_stacks(void);
 
+#  ifdef USER_DEFINED_STACKS
+/*
+ * Client-registered stacks (see `GC_register_stack` in `gc.h` file).
+ * `GC_stacks_next_epoch` starts a new scan round;
+ * `GC_active_stack_containing` looks up the registered stack (if any)
+ * containing the given stack pointer, marking it as scanned in the
+ * current round; `GC_push_suspended_stacks` pushes every registered
+ * stack that has a saved stack pointer and has not been scanned in the
+ * current round, returning the total size pushed.  All of these expect
+ * the allocator lock to be held; the latter three are meant to be
+ * called with the world stopped (from `GC_push_all_stacks`).
+ */
+GC_INNER void GC_stacks_next_epoch(void);
+GC_INNER struct GC_stack *GC_active_stack_containing(ptr_t sp);
+GC_INNER word GC_push_suspended_stacks(void);
+GC_INNER void GC_register_stack_inner(struct GC_stack *stk);
+GC_INNER void GC_unregister_stack_inner(struct GC_stack *stk);
+#  endif /* USER_DEFINED_STACKS */
+
 #  if defined(USE_PROC_FOR_LIBRARIES) && defined(LINUX)
 GC_INNER GC_bool GC_segment_is_thread_stack(ptr_t lo, ptr_t hi);
 #  endif

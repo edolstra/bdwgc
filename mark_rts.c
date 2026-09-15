@@ -1071,3 +1071,195 @@ GC_push_roots(GC_bool all, ptr_t cold_gc_frame)
     (*GC_push_other_roots)();
   }
 }
+
+#ifdef USER_DEFINED_STACKS
+
+/*
+ * Client-registered stacks (`GC_register_stack`), sorted by `base`
+ * (ascending).  The table elements point to client-owned
+ * `struct GC_stack` objects.  See the description in `gc.h` file.
+ *
+ * The collector must only ever *read* the client-owned descriptors:
+ * they may live in memory that is write-protected during a collection
+ * (e.g. the descriptors of the threads' own stacks are embedded in
+ * `GC_StackContext_Rep` objects allocated from the collector's heap,
+ * whose pages are write-protected by `MPROTECT_VDB` in the incremental
+ * mode, and on Darwin the write-fault handler thread is stopped for
+ * the duration of the world stop, so a fault raised by the collector
+ * itself is never serviced).  Hence any collector-internal per-stack
+ * state, such as the scan epoch stamp, is kept in the table entries
+ * here (scratch memory, which is never write-protected).
+ *
+ * FIXME: before upstreaming, the synchronization of `saved_sp` needs
+ * work.  It is written by mutator threads and read by the collector
+ * with the world stopped; for threads suspended by the stop-the-world
+ * signal, the suspend handshake orders those plain writes, but a
+ * thread inside `GC_do_blocking` is not signal-stopped and keeps
+ * running, so it can switch stacks (mutating `saved_sp` and
+ * `GC_current_stack`) concurrently with `GC_active_stack_containing`
+ * and `GC_push_suspended_stacks` — e.g. clearing a fiber's `saved_sp`
+ * after the collector decided it is not the active stack but before
+ * reading it here, so the fiber is scanned neither way and its roots
+ * are lost.  The fix is to (a) document (and where possible assert)
+ * that switching between registered stacks is forbidden while the
+ * collector is in the "inactive" state for the current thread, and
+ * (b) access `saved_sp` through `GC_cptr_load`-style atomics (the
+ * plain `volatile` accesses below are formally a data race and will
+ * be flagged by TSan).
+ */
+struct GC_stack_entry {
+  struct GC_stack *stk;
+  /*
+   * The value of `GC_stacks_epoch` at the last time the stack was
+   * scanned as the active stack of some stopped thread.
+   */
+  GC_word scanned_epoch;
+};
+
+STATIC struct GC_stack_entry *GC_stacks_tbl = NULL;
+STATIC size_t GC_stacks_cnt = 0;
+STATIC size_t GC_stacks_capacity = 0;
+
+/*
+ * Incremented at the beginning of every `GC_push_all_stacks()`
+ * invocation; used to avoid scanning a stack both as the active stack
+ * of some stopped thread and through its `saved_sp` (see
+ * `GC_push_suspended_stacks`).
+ */
+STATIC GC_word GC_stacks_epoch = 0;
+
+GC_INNER void
+GC_stacks_next_epoch(void)
+{
+  ++GC_stacks_epoch;
+}
+
+/* Return the index of the first entry whose `base` is above `sp`. */
+STATIC size_t
+GC_stack_upper_bound(ptr_t sp)
+{
+  size_t low = 0;
+  size_t high = GC_stacks_cnt;
+
+  while (high > low) {
+    size_t mid = (low + high) >> 1;
+
+    if (ADDR_LT(sp, (ptr_t)GC_stacks_tbl[mid].stk->base)) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return low;
+}
+
+GC_INNER struct GC_stack *
+GC_active_stack_containing(ptr_t sp)
+{
+  size_t i = GC_stack_upper_bound(sp);
+  struct GC_stack_entry *entry;
+
+  GC_ASSERT(I_HOLD_LOCK());
+  if (i == GC_stacks_cnt)
+    return NULL;
+  entry = &GC_stacks_tbl[i];
+  if (entry->stk->limit != NULL && ADDR_LT(sp, (ptr_t)entry->stk->limit))
+    return NULL;
+  entry->scanned_epoch = GC_stacks_epoch;
+  return entry->stk;
+}
+
+GC_INNER word
+GC_push_suspended_stacks(void)
+{
+  word total_size = 0;
+  size_t i;
+
+  GC_ASSERT(I_HOLD_LOCK());
+  for (i = 0; i < GC_stacks_cnt; i++) {
+    struct GC_stack *stk = GC_stacks_tbl[i].stk;
+    ptr_t sp = (ptr_t)stk->saved_sp;
+
+    if (sp != NULL && GC_stacks_tbl[i].scanned_epoch != GC_stacks_epoch) {
+      GC_ASSERT(ADDR_LT(sp, (ptr_t)stk->base));
+      GC_push_all_stack(sp, (ptr_t)stk->base);
+      total_size += (word)((ptr_t)stk->base - sp);
+    }
+  }
+  return total_size;
+}
+
+GC_INNER void
+GC_register_stack_inner(struct GC_stack *stk)
+{
+  size_t i, j;
+
+  GC_ASSERT(I_HOLD_LOCK());
+  GC_ASSERT(stk->base != NULL);
+  GC_ASSERT(NULL == stk->limit
+            || ADDR_LT((ptr_t)stk->limit, (ptr_t)stk->base));
+  if (GC_stacks_cnt == GC_stacks_capacity) {
+    struct GC_stack_entry *new_tbl;
+    size_t new_capacity
+        = 0 == GC_stacks_capacity ? 16 : GC_stacks_capacity * 2;
+
+    new_tbl = (struct GC_stack_entry *)GC_scratch_alloc(
+        new_capacity * sizeof(struct GC_stack_entry));
+    if (NULL == new_tbl)
+      ABORT("Insufficient memory for the registered stacks table");
+    if (GC_stacks_cnt > 0)
+      BCOPY(GC_stacks_tbl, new_tbl,
+            GC_stacks_cnt * sizeof(struct GC_stack_entry));
+    /* The old table is deliberately dropped (it is scratch memory). */
+    GC_stacks_tbl = new_tbl;
+    GC_stacks_capacity = new_capacity;
+  }
+  /*
+   * Note: duplicate entries (with the same `base`) may transiently
+   * exist: the record of a finished thread (and thus its
+   * auto-registered stack) may linger until the thread is joined,
+   * while the stack memory has already been reused for a newly
+   * created thread.
+   */
+  i = GC_stack_upper_bound((ptr_t)stk->base);
+  for (j = GC_stacks_cnt; j > i; j--)
+    GC_stacks_tbl[j] = GC_stacks_tbl[j - 1];
+  GC_stacks_tbl[i].stk = stk;
+  GC_stacks_tbl[i].scanned_epoch = 0;
+  ++GC_stacks_cnt;
+}
+
+GC_API void GC_CALL
+GC_register_stack(struct GC_stack *stk)
+{
+  LOCK();
+  GC_register_stack_inner(stk);
+  UNLOCK();
+}
+
+GC_INNER void
+GC_unregister_stack_inner(struct GC_stack *stk)
+{
+  size_t i = GC_stack_upper_bound((ptr_t)stk->base);
+
+  GC_ASSERT(I_HOLD_LOCK());
+  /* Skip over other entries with the same `base` (see above). */
+  while (i > 0 && GC_stacks_tbl[i - 1].stk != stk
+         && GC_stacks_tbl[i - 1].stk->base == stk->base)
+    --i;
+  if (UNLIKELY(0 == i || GC_stacks_tbl[i - 1].stk != stk))
+    ABORT("GC_unregister_stack: stack not registered");
+  for (; i < GC_stacks_cnt; i++)
+    GC_stacks_tbl[i - 1] = GC_stacks_tbl[i];
+  --GC_stacks_cnt;
+}
+
+GC_API void GC_CALL
+GC_unregister_stack(struct GC_stack *stk)
+{
+  LOCK();
+  GC_unregister_stack_inner(stk);
+  UNLOCK();
+}
+
+#endif /* USER_DEFINED_STACKS */

@@ -3618,6 +3618,20 @@ extern ptr_t GC_data_start;
 #  define STACKPTR_CORRECTOR_AVAILABLE
 #endif
 
+#if defined(GC_PTHREADS) && !defined(GC_WIN32_THREADS) && !defined(E2K) \
+    && !defined(IA64) && !defined(SPARC) && !defined(NACL)              \
+    && !(defined(DARWIN) && defined(DARWIN_PARSE_STACK))                \
+    && !defined(SN_TARGET_PSP2) && !defined(NO_USER_DEFINED_STACKS)
+/*
+ * Support scanning of client-registered stacks (`GC_register_stack`).
+ * Note: unsupported in case of `DARWIN_PARSE_STACK` because the stack
+ * upper bound is then determined by a frame-pointer walk from the
+ * captured stack pointer, which is incompatible with redirecting the
+ * scan to a registered stack.
+ */
+#  define USER_DEFINED_STACKS
+#endif
+
 #if defined(UNIX_LIKE) && defined(THREADS) && !defined(NO_CANCEL_SAFE) \
     && !defined(HOST_ANDROID)
 /*

@@ -903,6 +903,9 @@ GC_delete_thread(GC_thread t)
 #  if defined(GC_WIN32_THREADS) && !defined(MSWINCE)
   CloseHandle(t->handle);
 #  endif
+#  ifdef USER_DEFINED_STACKS
+  GC_unregister_crtn_stack(t->crtn);
+#  endif
 #  ifdef HAS_WIN32_THREADS_DISCOVERY
   if (GC_win32_dll_threads) {
     /*
@@ -1472,6 +1475,9 @@ GC_remove_all_threads_but_me(void)
           GC_remove_specific_after_fork(GC_thread_key, p->pthread_id);
         }
 #    endif
+#    ifdef USER_DEFINED_STACKS
+        GC_unregister_crtn_stack(p->crtn);
+#    endif
         /*
          * TODO: To avoid TSan hang (when updating `GC_bytes_freed`),
          * we just skip explicit freeing of `GC_threads` entries.
@@ -1800,6 +1806,77 @@ GC_set_markers_count(unsigned markers)
 
 GC_INNER GC_bool GC_in_thread_creation = FALSE;
 
+#  ifdef USER_DEFINED_STACKS
+__thread struct GC_stack *GC_current_stack = NULL;
+
+/*
+ * Fill in the hot end bound of the current thread's stack, if the
+ * platform provides a way to obtain it.  Knowing the bound makes the
+ * containing-stack lookup in `GC_push_all_stacks` exact; a `NULL`
+ * `limit` is a permitted fallback (see `gc.h` file).
+ */
+STATIC void
+GC_set_my_stack_limit(struct GC_stack *stk)
+{
+  stk->limit = NULL;
+#    ifdef HAVE_PTHREAD_GETATTR_NP
+  {
+    pthread_attr_t attr;
+
+    if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+      void *lo;
+      size_t size;
+
+      if (pthread_attr_getstack(&attr, &lo, &size) == 0)
+        stk->limit = lo;
+      (void)pthread_attr_destroy(&attr);
+    }
+  }
+#    elif defined(DARWIN)
+  {
+    pthread_t self = pthread_self();
+
+    stk->limit = (char *)pthread_get_stackaddr_np(self)
+                 - pthread_get_stacksize_np(self);
+  }
+#    endif
+}
+
+/*
+ * Register (or update the registration of) the descriptor of the
+ * current thread's own stack, and make `GC_current_stack` point to it.
+ */
+STATIC void
+GC_register_my_stack(GC_stack_context_t crtn)
+{
+  struct GC_stack *stk = &crtn->stack;
+
+  GC_ASSERT(I_HOLD_LOCK());
+  if (crtn->stack_registered && stk->base != (void *)crtn->stack_end) {
+    GC_unregister_stack_inner(stk);
+    crtn->stack_registered = FALSE;
+  }
+  if (!crtn->stack_registered) {
+    stk->base = (void *)crtn->stack_end;
+    stk->saved_sp = NULL;
+    GC_set_my_stack_limit(stk);
+    GC_register_stack_inner(stk);
+    crtn->stack_registered = TRUE;
+  }
+  GC_current_stack = stk;
+}
+
+GC_INNER void
+GC_unregister_crtn_stack(GC_stack_context_t crtn)
+{
+  GC_ASSERT(I_HOLD_LOCK());
+  if (crtn->stack_registered) {
+    GC_unregister_stack_inner(&crtn->stack);
+    crtn->stack_registered = FALSE;
+  }
+}
+#  endif /* USER_DEFINED_STACKS */
+
 GC_INNER_WIN32THREAD void
 GC_record_stack_base(GC_stack_context_t crtn, const struct GC_stack_base *sb)
 {
@@ -1814,6 +1891,9 @@ GC_record_stack_base(GC_stack_context_t crtn, const struct GC_stack_base *sb)
   crtn->backing_store_end = (ptr_t)sb->reg_base;
 #  elif defined(I386) && defined(GC_WIN32_THREADS)
   crtn->initial_stack_base = (ptr_t)sb->mem_base;
+#  endif
+#  ifdef USER_DEFINED_STACKS
+  GC_register_my_stack(crtn);
 #  endif
 }
 

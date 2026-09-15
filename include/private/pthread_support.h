@@ -149,6 +149,17 @@ struct GC_StackContext_Rep {
    * `GC_call_with_gc_active()` of this stack (thread); may be `NULL`.
    */
   struct GC_traced_stack_sect_s *traced_stack_sect;
+
+#  ifdef USER_DEFINED_STACKS
+  /*
+   * The registered descriptor of the thread's own stack (see
+   * `GC_register_stack` in `gc.h` file); registered in
+   * `GC_record_stack_base` if `stack_registered` is not set yet, and
+   * unregistered when the thread is removed from the threads table.
+   */
+  struct GC_stack stack;
+  GC_bool stack_registered;
+#  endif
 };
 typedef struct GC_StackContext_Rep *GC_stack_context_t;
 
@@ -525,6 +536,16 @@ GC_INNER GC_thread GC_lookup_by_pthread(pthread_t);
 GC_INNER GC_thread GC_lookup_thread(thread_id_t id);
 
 #  define GC_self_thread_inner() GC_lookup_thread(thread_id_self())
+
+#  ifdef USER_DEFINED_STACKS
+/*
+ * Unregister the descriptor of the thread stack owned by `crtn`
+ * (if registered).  Must be called before the thread is removed from
+ * the threads table (and, in particular, before `crtn` is freed).
+ * The caller holds the allocator lock.
+ */
+GC_INNER void GC_unregister_crtn_stack(GC_stack_context_t crtn);
+#  endif
 
 /*
  * Wait until an in-progress collection has finished.

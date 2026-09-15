@@ -359,6 +359,9 @@ GC_push_all_stacks(void)
 
   GC_ASSERT(I_HOLD_LOCK());
   GC_ASSERT(GC_thr_initialized);
+#  ifdef USER_DEFINED_STACKS
+  GC_stacks_next_epoch();
+#  endif
 #  ifdef DARWIN_PARSE_STACK
   /* Obtain the list of the threads from the kernel. */
   if (task_threads(my_task, &act_list, &listcount) != KERN_SUCCESS)
@@ -391,9 +394,28 @@ GC_push_all_stacks(void)
                                       &altstack_hi, &found_me);
 
         if (lo) {
+          struct GC_traced_stack_sect_s *traced_stack_sect
+              = p->crtn->traced_stack_sect;
+
+#    ifdef USER_DEFINED_STACKS
+          {
+            struct GC_stack *stk = GC_active_stack_containing(lo);
+
+            if (stk != NULL && (ptr_t)stk->base != hi) {
+              /*
+               * The thread is currently executing on a client-registered
+               * stack (e.g. a fiber or coroutine stack) other than its
+               * own one; scan that stack instead.  See the analogous
+               * code in `pthread_stop_world.c` file.
+               */
+              hi = (ptr_t)stk->base;
+              traced_stack_sect = NULL;
+            }
+          }
+#    endif
           GC_ASSERT(ADDR_GE(hi, lo));
           total_size += hi - lo;
-          GC_push_all_stack_sections(lo, hi, p->crtn->traced_stack_sect);
+          GC_push_all_stack_sections(lo, hi, traced_stack_sect);
         }
         if (altstack_lo) {
           total_size += altstack_hi - altstack_lo;
@@ -403,6 +425,10 @@ GC_push_all_stacks(void)
       }
     }
   }
+#    ifdef USER_DEFINED_STACKS
+  /* Scan the suspended client-registered (fiber, coroutine) stacks. */
+  total_size += GC_push_suspended_stacks();
+#    endif
 #  endif
   mach_port_deallocate(my_task, my_thread);
   GC_VERBOSE_LOG_PRINTF("Pushed %d thread stacks\n", nthreads);

@@ -1132,6 +1132,10 @@ if(BUILD_TESTING)
         )
         add_test(NAME initfromthreadtest COMMAND initfromthreadtest)
 
+        add_executable(stackstest tests/stacks.c ${NODIST_SRC})
+        target_link_libraries(stackstest PRIVATE gc ${THREADDLLIBS_LIST})
+        add_test(NAME stackstest COMMAND stackstest)
+
         add_executable(
             subthreadcreatetest
             tests/subthreadcreate.c
